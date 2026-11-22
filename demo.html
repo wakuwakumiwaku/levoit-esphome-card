@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Levoit ESPHome Card — Preview</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 28px;
+      background: #191a21;
+      color: #f8f8f2;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, 360px);
+      gap: 24px;
+      justify-content: center;
+      align-items: start;
+    }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <levoit-esphome-card id="card1"></levoit-esphome-card>
+    <levoit-esphome-card id="card2"></levoit-esphome-card>
+  </div>
+
+  <script type="module" src="./levoit-esphome-card.js"></script>
+  <script type="module">
+    function makeMockHass(prefix, init) {
+      const states = {
+        [`fan.${prefix}_fan`]: {
+          state: init.on ? "on" : "off",
+          attributes: { friendly_name: `${init.name} Fan`, percentage: init.pct, percentage_step: init.step || 33.3333 },
+        },
+        [`sensor.${prefix}_aq_pm_2_5`]: { state: String(init.pm25) },
+        [`sensor.${prefix}_aqi`]: { state: String(init.aqi) },
+        [`sensor.${prefix}_current_cadr`]: { state: String(init.cadr) },
+        [`sensor.${prefix}_filter`]: { state: String(init.filter) },
+        [`binary_sensor.${prefix}_filter_low`]: { state: init.filter < 5 ? "on" : "off" },
+        [`switch.${prefix}_display`]: { state: init.display ? "on" : "off" },
+        [`switch.${prefix}_child_lock`]: { state: init.lock ? "on" : "off" },
+        [`select.${prefix}_fan_operating_mode`]: { state: init.mode, attributes: { options: ["Manual", "Sleep", "Auto"] } },
+        [`select.${prefix}_auto_mode`]: { state: init.autoMode || "Default", attributes: { options: ["Default", "Quiet", "Room Size"] } },
+        [`number.${prefix}_timer_min`]: { state: String(init.timer || 0) },
+        [`text_sensor.${prefix}_timer_remaining`]: { state: init.timer ? `${init.timer} min` : "Off" },
+        [`text_sensor.${prefix}_error`]: { state: "Ok" },
+      };
+      const listeners = [];
+      const hass = {
+        states,
+        callService(domain, service, data) {
+          const st = states[data.entity_id];
+          if (!st) return;
+          if (domain === "fan") {
+            if (service === "turn_on") { st.state = "on"; if (!st.attributes.percentage) st.attributes.percentage = 33; }
+            if (service === "turn_off") { st.state = "off"; }
+            if (service === "set_percentage") { st.state = "on"; st.attributes.percentage = data.percentage; states[`select.${prefix}_fan_operating_mode`].state = "Manual"; }
+          } else if (domain === "select" && service === "select_option") {
+            st.state = data.option;
+            if (data.entity_id.includes("operating_mode")) states[`fan.${prefix}_fan`].state = "on";
+          } else if (domain === "switch" && service === "toggle") {
+            st.state = st.state === "on" ? "off" : "on";
+          } else if (domain === "number" && service === "set_value") {
+            st.state = String(data.value);
+            states[`text_sensor.${prefix}_timer_remaining`].state = data.value ? `${data.value} min` : "Off";
+          }
+          listeners.forEach((fn) => fn());
+        },
+        _subscribe(fn) { listeners.push(fn); },
+      };
+      return hass;
+    }
+
+    const c1 = document.getElementById("card1");
+    const h1 = makeMockHass("core300s_bedroom", { name: "Bedroom Core 300S", on: true, pct: 67, pm25: 5, aqi: 1, cadr: 142, filter: 92, display: true, lock: false, mode: "Auto", autoMode: "Quiet", timer: 60 });
+    c1.setConfig({ entity: "fan.core300s_bedroom_fan", theme: "dracula" });
+    c1.hass = h1;
+    h1._subscribe(() => { c1.hass = { ...h1 }; });
+
+    const c2 = document.getElementById("card2");
+    const h2 = makeMockHass("core400s_living", { name: "Living Room Core 400S", on: true, pct: 100, step: 25, pm25: 68, aqi: 4, cadr: 442, filter: 18, display: true, lock: true, mode: "Manual", timer: 0 });
+    c2.setConfig({ entity: "fan.core400s_living_fan", theme: "dracula" });
+    c2.hass = h2;
+    h2._subscribe(() => { c2.hass = { ...h2 }; });
+  </script>
+</body>
+</html>
