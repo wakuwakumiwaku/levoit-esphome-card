@@ -1,14 +1,15 @@
 /**
  * Levoit ESPHome Card
  * Custom Home Assistant Lovelace card designed for tuct/levoit ESPHome purifiers.
- * Zero-dependency Web Component with visual editor, entity auto-discovery,
- * and Dracula / adaptive Home Assistant themes.
+ * Supports both single-purifier detail view (`entity:`) and whole-home multi-purifier
+ * overview mode (`entities: [...]`) with inline expandable controls, master actions,
+ * visual editor, entity auto-discovery, and Dracula / adaptive HA themes.
  *
  * https://github.com/wakuwakumiwaku/levoit-esphome-card
  * License: MIT
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 const AQI_LEVELS = [
   { max: 1, label: "Very Good", color: "#50fa7b" },
@@ -43,13 +44,20 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+const FAN_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,11A1,1 0 0,0 11,12A1,1 0 0,0 12,13A1,1 0 0,0 13,12A1,1 0 0,0 12,11M12.5,2C17,2 17.11,5.57 14.75,6.75C13.76,7.24 13.32,8.29 13.13,9.22C13.61,9.42 14.03,9.73 14.35,10.13C18.05,8.13 22.03,8.92 22.03,12.5C22.03,17 18.46,17.1 17.28,14.73C16.78,13.74 15.72,13.3 14.79,13.11C14.59,13.59 14.28,14 13.88,14.34C15.87,18.03 15.08,22 11.5,22C7,22 6.91,18.42 9.27,17.24C10.25,16.75 10.69,15.71 10.89,14.79C10.4,14.59 9.97,14.27 9.65,13.87C5.96,15.85 2,15.07 2,11.5C2,7 5.56,6.89 6.74,9.26C7.24,10.25 8.29,10.68 9.22,10.87C9.41,10.39 9.73,9.97 10.14,9.65C8.15,5.96 8.94,2 12.5,2Z"/></svg>`;
+const POWER_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16.56,5.44L15.11,6.89C16.84,7.94 18,9.83 18,12A6,6 0 0,1 12,18A6,6 0 0,1 6,12C6,9.83 7.16,7.94 8.88,6.88L7.44,5.44C5.36,6.88 4,9.28 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12C20,9.28 18.64,6.88 16.56,5.44M13,3H11V13H13"/></svg>`;
+const BULB_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z"/></svg>`;
+const LOCK_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10C4,8.89 4.9,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z"/></svg>`;
+const TIMER_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,20A7,7 0 0,1 5,13A7,7 0 0,1 12,6A7,7 0 0,1 19,13A7,7 0 0,1 12,20M19.03,7.39L20.45,5.97C20,5.46 19.55,5 19.04,4.56L17.62,6C16.07,4.74 14.12,4 12,4A9,9 0 0,0 3,13A9,9 0 0,0 12,22C17,22 21,17.97 21,13C21,10.88 20.26,8.93 19.03,7.39M11,14H13V8H11M15,1H9V3H15V1Z"/></svg>`;
+const CHEVRON_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z"/></svg>`;
+
 class LevoitEsphomeCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._config = {};
     this._hass = null;
-    this._rendered = false;
+    this._expandedEntity = null;
   }
 
   static getConfigElement() {
@@ -72,8 +80,9 @@ class LevoitEsphomeCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config || !config.entity) {
-      throw new Error("Please specify a fan `entity` (e.g. fan.core300spaup_fan).");
+    const hasEntities = Array.isArray(config?.entities) && config.entities.length > 0;
+    if (!config || (!config.entity && !hasEntities)) {
+      throw new Error("Please specify either `entity` (single purifier) or `entities` (list of purifiers).");
     }
     this._config = {
       theme: "dracula",
@@ -91,21 +100,43 @@ class LevoitEsphomeCard extends HTMLElement {
     this._render();
   }
 
+  _isMulti() {
+    return Array.isArray(this._config.entities) && this._config.entities.length > 0;
+  }
+
   getCardSize() {
+    if (this._isMulti()) {
+      return Math.max(3, 2 + Math.ceil(this._config.entities.length * 0.9));
+    }
     return this._config.compact ? 3 : 5;
   }
 
+  getGridOptions() {
+    if (this._isMulti()) {
+      return {
+        columns: 12,
+        min_columns: 6,
+        rows: Math.max(4, 2 + Math.ceil(this._config.entities.length * 0.85)),
+        min_rows: 3,
+      };
+    }
+    return {
+      columns: 6,
+      min_columns: 6,
+      rows: this._config.compact ? 4 : 6,
+      min_rows: 3,
+    };
+  }
+
   /**
-   * Auto-discover sibling tuct/levoit entities from the fan entity prefix.
-   * Example: fan.core300spaup_fan -> prefix "core300spaup"
+   * Auto-discover sibling tuct/levoit entities from a fan entity prefix.
    */
-  _resolveEntities() {
+  _resolveEntities(fanId, overrides = {}) {
     const states = this._hass?.states || {};
-    const fanId = this._config.entity;
     const base = fanId.replace(/^fan\./, "").replace(/_fan$/, "");
 
     const findEntity = (overrideKey, domain, patterns) => {
-      if (this._config[overrideKey]) return this._config[overrideKey];
+      if (overrides[overrideKey]) return overrides[overrideKey];
       const prefix = `${domain}.${base}_`;
       const candidates = Object.keys(states).filter((id) => id.startsWith(prefix));
       for (const rx of patterns) {
@@ -152,6 +183,108 @@ class LevoitEsphomeCard extends HTMLElement {
     this._hass.callService(domain, service, data);
   }
 
+  _readDevice(fanId, overrides = {}) {
+    const e = this._resolveEntities(fanId, overrides);
+    const fanSt = this._state(e.fan);
+    if (!fanSt) return { missing: true, fanId, e };
+
+    const isOn = fanSt.state === "on";
+    const pct = Number(fanSt.attributes?.percentage ?? 0);
+    const step = Number(fanSt.attributes?.percentage_step ?? 33.3333);
+    const speedCount = Math.max(1, Math.min(5, Math.round(100 / step)));
+    const currentSpeed = isOn && pct > 0 ? Math.max(1, Math.round(pct / step)) : 0;
+
+    const name = overrides.name || fanSt.attributes?.friendly_name?.replace(/\s+Fan$/i, "") || fanId;
+    const pm25 = this._num(e.pm25);
+    const aqi = this._num(e.aqi);
+    const cadr = this._num(e.cadr);
+    const filterPct = this._num(e.filter);
+    const filterLow = this._state(e.filterLow)?.state === "on";
+    const displayOn = this._state(e.display)?.state === "on";
+    const childLockOn = this._state(e.childLock)?.state === "on";
+    const opModeSt = this._state(e.operatingMode);
+    const autoModeSt = this._state(e.autoMode);
+    const timerNum = this._num(e.timer);
+    const timerRem = this._state(e.timerRemaining)?.state;
+    const errorTxt = this._state(e.error)?.state;
+    const hasError = Boolean(errorTxt && errorTxt.toLowerCase() !== "ok" && errorTxt !== "unknown" && errorTxt !== "unavailable");
+
+    const opOptions = opModeSt?.attributes?.options || (fanSt.attributes?.preset_modes || []);
+    const activeOp = opModeSt?.state || fanSt.attributes?.preset_mode || "";
+    const autoOptions = autoModeSt?.attributes?.options || [];
+    const activeAuto = autoModeSt?.state || "";
+
+    const aqiInfo = getAqiInfo(aqi, pm25);
+    const spinClass = !isOn ? "" : currentSpeed >= 3 ? "spin-fast" : currentSpeed === 2 ? "spin-med" : "spin-slow";
+    const filterColor = filterLow || (filterPct !== null && filterPct < 10)
+      ? "#ff5555"
+      : filterPct !== null && filterPct < 25
+      ? "#ffb86c"
+      : "#50fa7b";
+
+    const statusText = isOn
+      ? (activeOp && activeOp !== "Manual" ? activeOp : `Speed ${currentSpeed || 1}`)
+      : "Standby";
+
+    const timerLabel = (timerRem && timerRem !== "Off" && timerRem !== "unknown" && timerRem !== "unavailable")
+      ? timerRem
+      : (timerNum && timerNum > 0 ? `${timerNum}m` : "Timer");
+
+    return {
+      missing: false, fanId, e, fanSt, isOn, pct, step, speedCount, currentSpeed,
+      name, pm25, aqi, cadr, filterPct, filterLow, filterColor, displayOn, childLockOn,
+      opOptions, activeOp, autoOptions, activeAuto, timerNum, timerLabel,
+      errorTxt, hasError, aqiInfo, spinClass, statusText,
+    };
+  }
+
+  _renderControlsHtml(d, compactLabels = false) {
+    const speedButtons = Array.from({ length: d.speedCount }, (_, i) => {
+      const lvl = i + 1;
+      const lvlPct = Math.min(100, Math.round(lvl * d.step));
+      const active = d.isOn && d.currentSpeed === lvl && (!d.activeOp || d.activeOp === "Manual");
+      return `<button class="seg-btn ${active ? "active" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="speed" data-pct="${lvlPct}">Speed ${lvl}</button>`;
+    }).join("");
+
+    const modeButtons = d.opOptions.map((opt) => {
+      const active = d.isOn && d.activeOp === opt;
+      return `<button class="seg-btn cyan ${active ? "active" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="mode" data-opt="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`;
+    }).join("");
+
+    const autoButtons = (d.isOn && d.activeOp === "Auto" && d.autoOptions.length > 0)
+      ? `${!compactLabels ? `<div class="section-label">Auto Profile</div>` : ""}
+         <div class="segmented">
+           ${d.autoOptions.map((opt) => `<button class="seg-btn ${d.activeAuto === opt ? "active" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="automode" data-opt="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`).join("")}
+         </div>`
+      : "";
+
+    return `
+      ${!compactLabels ? `<div class="section-label">Fan Speed</div>` : ""}
+      <div class="segmented">${speedButtons}</div>
+
+      ${d.opOptions.length > 0 ? `
+        ${!compactLabels ? `<div class="section-label">Mode</div>` : ""}
+        <div class="segmented">${modeButtons}</div>` : ""}
+
+      ${autoButtons}
+
+      <div class="quick-row">
+        ${d.e.display ? `
+          <button class="chip-btn green ${d.displayOn ? "active" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="display">
+            ${BULB_SVG} Display
+          </button>` : ""}
+        ${d.e.childLock ? `
+          <button class="chip-btn ${d.childLockOn ? "active" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="lock">
+            ${LOCK_SVG} Lock
+          </button>` : ""}
+        ${this._config.show_timer && d.e.timer ? `
+          <button class="chip-btn green ${d.timerNum > 0 ? "active" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="timer" title="Click to add +60 min (cycles off after 4h)">
+            ${TIMER_SVG} ${escapeHtml(d.timerLabel)}
+          </button>` : ""}
+      </div>
+    `;
+  }
+
   _styles() {
     const isDracula = this._config.theme !== "auto";
     return `
@@ -174,7 +307,7 @@ class LevoitEsphomeCard extends HTMLElement {
         font-family: var(--paper-font-body1_-_font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
       }
 
-      ha-card, .card {
+      .card {
         background: var(--lec-bg);
         color: var(--lec-text);
         border: 1px solid var(--lec-border);
@@ -182,12 +315,9 @@ class LevoitEsphomeCard extends HTMLElement {
         padding: 16px;
         box-sizing: border-box;
         box-shadow: ${isDracula ? "0 8px 24px rgba(0, 0, 0, 0.35)" : "var(--ha-card-box-shadow, none)"};
-        transition: border-color 0.2s ease;
       }
 
-      .card.compact {
-        padding: 12px 14px;
-      }
+      .card.compact { padding: 12px 14px; }
 
       .header {
         display: flex;
@@ -214,19 +344,17 @@ class LevoitEsphomeCard extends HTMLElement {
         justify-content: center;
         flex-shrink: 0;
         color: var(--lec-muted);
-        transition: background 0.2s, color 0.2s;
       }
+
+      .fan-badge.sm { width: 30px; height: 30px; border-radius: 9px; }
+      .fan-badge.sm svg { width: 17px; height: 17px; }
 
       .fan-badge.on {
         background: rgba(189, 147, 249, 0.18);
         color: var(--lec-accent);
       }
 
-      .fan-badge svg {
-        width: 22px;
-        height: 22px;
-      }
-
+      .fan-badge svg { width: 22px; height: 22px; }
       .fan-badge.spin-slow svg { animation: spin 3.2s linear infinite; }
       .fan-badge.spin-med svg  { animation: spin 1.7s linear infinite; }
       .fan-badge.spin-fast svg { animation: spin 0.85s linear infinite; }
@@ -236,10 +364,7 @@ class LevoitEsphomeCard extends HTMLElement {
         to   { transform: rotate(360deg); }
       }
 
-      .title-text {
-        min-width: 0;
-      }
-
+      .title-text { min-width: 0; }
       .name {
         font-size: 15px;
         font-weight: 600;
@@ -256,6 +381,7 @@ class LevoitEsphomeCard extends HTMLElement {
         align-items: center;
         gap: 6px;
         margin-top: 2px;
+        flex-wrap: wrap;
       }
 
       .aqi-pill {
@@ -267,13 +393,10 @@ class LevoitEsphomeCard extends HTMLElement {
         padding: 2px 8px;
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.06);
+        white-space: nowrap;
       }
 
-      .aqi-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-      }
+      .aqi-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 
       .power-btn {
         width: 38px;
@@ -290,16 +413,13 @@ class LevoitEsphomeCard extends HTMLElement {
         transition: all 0.18s ease;
       }
 
-      .power-btn:hover {
-        background: var(--lec-surface-hover);
-        color: var(--lec-text);
-      }
-
+      .power-btn.sm { width: 32px; height: 32px; border-radius: 9px; }
+      .power-btn:hover { background: var(--lec-surface-hover); color: var(--lec-text); }
       .power-btn.on {
         background: var(--lec-accent);
         border-color: var(--lec-accent);
         color: #282a36;
-        box-shadow: 0 0 14px rgba(189, 147, 249, 0.45);
+        box-shadow: 0 0 12px rgba(189, 147, 249, 0.42);
       }
 
       .metrics {
@@ -321,69 +441,18 @@ class LevoitEsphomeCard extends HTMLElement {
         align-items: center;
         justify-content: center;
       }
+      .gauge svg { width: 82px; height: 82px; transform: rotate(-90deg); }
+      .gauge-center { position: absolute; text-align: center; line-height: 1.1; }
+      .gauge-val { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+      .gauge-unit { font-size: 10px; color: var(--lec-muted); margin-top: 2px; }
 
-      .gauge svg {
-        width: 82px;
-        height: 82px;
-        transform: rotate(-90deg);
-      }
+      .stats { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+      .stat-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; gap: 8px; }
+      .stat-label { color: var(--lec-muted); }
+      .stat-val { font-weight: 600; color: var(--lec-text); }
 
-      .gauge-center {
-        position: absolute;
-        text-align: center;
-        line-height: 1.1;
-      }
-
-      .gauge-val {
-        font-size: 20px;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-      }
-
-      .gauge-unit {
-        font-size: 10px;
-        color: var(--lec-muted);
-        margin-top: 2px;
-      }
-
-      .stats {
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
-        min-width: 0;
-      }
-
-      .stat-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        font-size: 12px;
-        gap: 8px;
-      }
-
-      .stat-label {
-        color: var(--lec-muted);
-      }
-
-      .stat-val {
-        font-weight: 600;
-        color: var(--lec-text);
-      }
-
-      .filter-bar {
-        width: 100%;
-        height: 6px;
-        border-radius: 999px;
-        background: rgba(0, 0, 0, 0.28);
-        overflow: hidden;
-        margin-top: 4px;
-      }
-
-      .filter-fill {
-        height: 100%;
-        border-radius: 999px;
-        transition: width 0.35s ease;
-      }
+      .filter-bar { width: 100%; height: 6px; border-radius: 999px; background: rgba(0, 0, 0, 0.28); overflow: hidden; margin-top: 4px; }
+      .filter-fill { height: 100%; border-radius: 999px; transition: width 0.35s ease; }
 
       .error-banner {
         background: rgba(255, 85, 85, 0.16);
@@ -410,7 +479,7 @@ class LevoitEsphomeCard extends HTMLElement {
         grid-auto-flow: column;
         grid-auto-columns: 1fr;
         gap: 6px;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
       }
 
       .seg-btn {
@@ -425,33 +494,14 @@ class LevoitEsphomeCard extends HTMLElement {
         transition: all 0.15s ease;
         text-align: center;
       }
+      .seg-btn:hover { background: var(--lec-surface-hover); color: var(--lec-text); }
+      .seg-btn.active { background: rgba(189, 147, 249, 0.22); border-color: var(--lec-accent); color: var(--lec-text); }
+      .seg-btn.cyan.active { background: rgba(139, 233, 253, 0.18); border-color: var(--lec-cyan); color: var(--lec-cyan); }
 
-      .seg-btn:hover {
-        background: var(--lec-surface-hover);
-        color: var(--lec-text);
-      }
-
-      .seg-btn.active {
-        background: rgba(189, 147, 249, 0.22);
-        border-color: var(--lec-accent);
-        color: var(--lec-text);
-      }
-
-      .seg-btn.cyan.active {
-        background: rgba(139, 233, 253, 0.18);
-        border-color: var(--lec-cyan);
-        color: var(--lec-cyan);
-      }
-
-      .quick-row {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-
+      .quick-row { display: flex; gap: 8px; flex-wrap: wrap; }
       .chip-btn {
         flex: 1 1 0;
-        min-width: 78px;
+        min-width: 72px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -466,39 +516,108 @@ class LevoitEsphomeCard extends HTMLElement {
         cursor: pointer;
         transition: all 0.15s ease;
       }
+      .chip-btn:hover { background: var(--lec-surface-hover); color: var(--lec-text); }
+      .chip-btn.active { background: rgba(255, 121, 198, 0.16); border-color: var(--lec-pink); color: var(--lec-pink); }
+      .chip-btn.green.active { background: rgba(80, 250, 123, 0.16); border-color: var(--lec-green); color: var(--lec-green); }
+      .chip-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
 
-      .chip-btn:hover {
-        background: var(--lec-surface-hover);
+      /* Multi-purifier Whole-Home Overview styles */
+      .overview-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      .master-btns {
+        display: flex;
+        gap: 6px;
+      }
+      .master-btn {
+        border: 1px solid var(--lec-border);
+        background: var(--lec-surface);
         color: var(--lec-text);
+        border-radius: 9px;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
       }
+      .master-btn:hover { background: var(--lec-surface-hover); border-color: var(--lec-accent); }
+      .master-btn.danger:hover { border-color: var(--lec-red); color: var(--lec-red); }
 
-      .chip-btn.active {
-        background: rgba(255, 121, 198, 0.16);
-        border-color: var(--lec-pink);
-        color: var(--lec-pink);
+      .summary-strip {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-bottom: 12px;
       }
+      .summary-box {
+        background: var(--lec-surface);
+        border-radius: 11px;
+        padding: 8px 10px;
+        text-align: center;
+      }
+      .summary-k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--lec-muted); }
+      .summary-v { font-size: 15px; font-weight: 700; margin-top: 2px; }
 
-      .chip-btn.green.active {
-        background: rgba(80, 250, 123, 0.16);
-        border-color: var(--lec-green);
-        color: var(--lec-green);
+      .device-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
       }
+      .device-item {
+        background: var(--lec-surface);
+        border: 1px solid transparent;
+        border-radius: 12px;
+        overflow: hidden;
+        transition: border-color 0.15s ease;
+      }
+      .device-item.expanded { border-color: var(--lec-border); }
 
-      .chip-btn svg {
-        width: 15px;
-        height: 15px;
-        flex-shrink: 0;
+      .device-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto auto auto auto;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        cursor: pointer;
+        user-select: none;
       }
+      .device-row:hover { background: rgba(255, 255, 255, 0.03); }
+
+      .row-info { min-width: 0; }
+      .row-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .row-sub { font-size: 11px; color: var(--lec-muted); }
+
+      .row-filter {
+        font-size: 11px;
+        font-weight: 600;
+        min-width: 34px;
+        text-align: right;
+      }
+      .row-chev {
+        color: var(--lec-muted);
+        display: flex;
+        transition: transform 0.2s ease;
+      }
+      .device-item.expanded .row-chev { transform: rotate(180deg); color: var(--lec-accent); }
+
+      .device-drawer {
+        padding: 10px 12px 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+        background: rgba(0, 0, 0, 0.16);
+      }
+      .device-drawer .seg-btn, .device-drawer .chip-btn { background: var(--lec-bg); }
+      .device-drawer .seg-btn:hover, .device-drawer .chip-btn:hover { background: var(--lec-surface-hover); }
     `;
   }
 
-  _render() {
-    if (!this.shadowRoot || !this._config.entity) return;
-
-    const e = this._resolveEntities();
-    const fanSt = this._state(e.fan);
-
-    if (!fanSt) {
+  _renderSingle() {
+    const d = this._readDevice(this._config.entity, this._config);
+    if (d.missing) {
       this.shadowRoot.innerHTML = `
         <style>${this._styles()}</style>
         <div class="card">
@@ -507,208 +626,232 @@ class LevoitEsphomeCard extends HTMLElement {
       return;
     }
 
-    const isOn = fanSt.state === "on";
-    const pct = Number(fanSt.attributes?.percentage ?? 0);
-    const step = Number(fanSt.attributes?.percentage_step ?? 33.3333);
-    const speedCount = Math.max(1, Math.min(5, Math.round(100 / step)));
-    const currentSpeed = isOn && pct > 0 ? Math.max(1, Math.round(pct / step)) : 0;
-
-    const name = this._config.name || fanSt.attributes?.friendly_name?.replace(/\s+Fan$/i, "") || "Levoit Purifier";
-    const pm25 = this._num(e.pm25);
-    const aqi = this._num(e.aqi);
-    const cadr = this._num(e.cadr);
-    const filterPct = this._num(e.filter);
-    const filterLow = this._state(e.filterLow)?.state === "on";
-    const displayOn = this._state(e.display)?.state === "on";
-    const childLockOn = this._state(e.childLock)?.state === "on";
-    const opModeSt = this._state(e.operatingMode);
-    const autoModeSt = this._state(e.autoMode);
-    const timerNum = this._num(e.timer);
-    const timerRem = this._state(e.timerRemaining)?.state;
-    const errorTxt = this._state(e.error)?.state;
-    const hasError = errorTxt && errorTxt.toLowerCase() !== "ok" && errorTxt !== "unknown" && errorTxt !== "unavailable";
-
-    const aqiInfo = getAqiInfo(aqi, pm25);
-    const spinClass = !isOn ? "" : currentSpeed >= 3 ? "spin-fast" : currentSpeed === 2 ? "spin-med" : "spin-slow";
-
-    // SVG gauge ring (circumference for r=34 is ~213.6)
     const radius = 34;
     const circ = 2 * Math.PI * radius;
-    const pmFraction = pm25 !== null ? Math.min(1, Math.max(0.08, pm25 / 100)) : 0;
+    const pmFraction = d.pm25 !== null ? Math.min(1, Math.max(0.08, d.pm25 / 100)) : 0;
     const dashOffset = circ * (1 - pmFraction);
-
-    const filterColor = filterLow || (filterPct !== null && filterPct < 10)
-      ? "#ff5555"
-      : filterPct !== null && filterPct < 25
-      ? "#ffb86c"
-      : "#50fa7b";
-
-    const opOptions = opModeSt?.attributes?.options || (fanSt.attributes?.preset_modes || []);
-    const activeOp = opModeSt?.state || fanSt.attributes?.preset_mode || "";
-
-    const autoOptions = autoModeSt?.attributes?.options || [];
-    const activeAuto = autoModeSt?.state || "";
-
-    const speedButtons = Array.from({ length: speedCount }, (_, i) => {
-      const lvl = i + 1;
-      const lvlPct = Math.min(100, Math.round(lvl * step));
-      const active = isOn && currentSpeed === lvl && (!activeOp || activeOp === "Manual");
-      return `<button class="seg-btn ${active ? "active" : ""}" data-action="speed" data-pct="${lvlPct}">Speed ${lvl}</button>`;
-    }).join("");
-
-    const modeButtons = opOptions.map((opt) => {
-      const active = isOn && activeOp === opt;
-      return `<button class="seg-btn cyan ${active ? "active" : ""}" data-action="mode" data-opt="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`;
-    }).join("");
-
-    const autoButtons = (isOn && activeOp === "Auto" && autoOptions.length > 0)
-      ? `<div class="section-label">Auto Profile</div>
-         <div class="segmented">
-           ${autoOptions.map((opt) => `<button class="seg-btn ${activeAuto === opt ? "active" : ""}" data-action="automode" data-opt="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`).join("")}
-         </div>`
-      : "";
-
-    const statusText = isOn
-      ? (activeOp && activeOp !== "Manual" ? activeOp : `Speed ${currentSpeed || 1}`)
-      : "Standby";
-
-    const timerLabel = (timerRem && timerRem !== "Off" && timerRem !== "unknown" && timerRem !== "unavailable")
-      ? timerRem
-      : (timerNum && timerNum > 0 ? `${timerNum}m` : "Timer");
-
-    const showMetrics = pm25 !== null || (this._config.show_cadr && cadr !== null) || (this._config.show_filter && filterPct !== null);
+    const showMetrics = d.pm25 !== null || (this._config.show_cadr && d.cadr !== null) || (this._config.show_filter && d.filterPct !== null);
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
       <div class="card ${this._config.compact ? "compact" : ""}">
         <div class="header">
           <div class="title-wrap">
-            <div class="fan-badge ${isOn ? "on" : ""} ${spinClass}">
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12,11A1,1 0 0,0 11,12A1,1 0 0,0 12,13A1,1 0 0,0 13,12A1,1 0 0,0 12,11M12.5,2C17,2 17.11,5.57 14.75,6.75C13.76,7.24 13.32,8.29 13.13,9.22C13.61,9.42 14.03,9.73 14.35,10.13C18.05,8.13 22.03,8.92 22.03,12.5C22.03,17 18.46,17.1 17.28,14.73C16.78,13.74 15.72,13.3 14.79,13.11C14.59,13.59 14.28,14 13.88,14.34C15.87,18.03 15.08,22 11.5,22C7,22 6.91,18.42 9.27,17.24C10.25,16.75 10.69,15.71 10.89,14.79C10.4,14.59 9.97,14.27 9.65,13.87C5.96,15.85 2,15.07 2,11.5C2,7 5.56,6.89 6.74,9.26C7.24,10.25 8.29,10.68 9.22,10.87C9.41,10.39 9.73,9.97 10.14,9.65C8.15,5.96 8.94,2 12.5,2Z"/>
-              </svg>
-            </div>
+            <div class="fan-badge ${d.isOn ? "on" : ""} ${d.spinClass}">${FAN_SVG}</div>
             <div class="title-text">
-              <div class="name">${escapeHtml(name)}</div>
+              <div class="name">${escapeHtml(d.name)}</div>
               <div class="subtitle">
-                <span>${escapeHtml(statusText)}</span>
-                ${pm25 !== null || aqi !== null ? `
-                  <span class="aqi-pill" style="color:${aqiInfo.color}">
-                    <span class="aqi-dot" style="background:${aqiInfo.color}"></span>
-                    ${escapeHtml(aqiInfo.label)}
+                <span>${escapeHtml(d.statusText)}</span>
+                ${d.pm25 !== null || d.aqi !== null ? `
+                  <span class="aqi-pill" style="color:${d.aqiInfo.color}">
+                    <span class="aqi-dot" style="background:${d.aqiInfo.color}"></span>
+                    ${escapeHtml(d.aqiInfo.label)}
                   </span>` : ""}
               </div>
             </div>
           </div>
-          <button class="power-btn ${isOn ? "on" : ""}" data-action="power" title="Toggle Power">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M16.56,5.44L15.11,6.89C16.84,7.94 18,9.83 18,12A6,6 0 0,1 12,18A6,6 0 0,1 6,12C6,9.83 7.16,7.94 8.88,6.88L7.44,5.44C5.36,6.88 4,9.28 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12C20,9.28 18.64,6.88 16.56,5.44M13,3H11V13H13"/>
-            </svg>
+          <button class="power-btn ${d.isOn ? "on" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="power" title="Toggle Power">
+            ${POWER_SVG}
           </button>
         </div>
 
-        ${hasError ? `<div class="error-banner">⚠ Purifier Error: ${escapeHtml(errorTxt)}</div>` : ""}
+        ${d.hasError ? `<div class="error-banner">⚠ Purifier Error: ${escapeHtml(d.errorTxt)}</div>` : ""}
 
         ${showMetrics ? `
           <div class="metrics">
-            ${pm25 !== null ? `
+            ${d.pm25 !== null ? `
               <div class="gauge">
                 <svg viewBox="0 0 82 82">
                   <circle cx="41" cy="41" r="${radius}" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="6"/>
-                  <circle cx="41" cy="41" r="${radius}" fill="none" stroke="${aqiInfo.color}" stroke-width="6"
+                  <circle cx="41" cy="41" r="${radius}" fill="none" stroke="${d.aqiInfo.color}" stroke-width="6"
                     stroke-linecap="round" stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${dashOffset.toFixed(1)}"/>
                 </svg>
                 <div class="gauge-center">
-                  <div class="gauge-val" style="color:${aqiInfo.color}">${Math.round(pm25)}</div>
+                  <div class="gauge-val" style="color:${d.aqiInfo.color}">${Math.round(d.pm25)}</div>
                   <div class="gauge-unit">µg/m³</div>
                 </div>
               </div>` : `<div></div>`}
             <div class="stats">
-              ${this._config.show_cadr && cadr !== null ? `
+              ${this._config.show_cadr && d.cadr !== null ? `
                 <div class="stat-row">
                   <span class="stat-label">Airflow (CADR)</span>
-                  <span class="stat-val">${Math.round(cadr)} m³/h</span>
+                  <span class="stat-val">${Math.round(d.cadr)} m³/h</span>
                 </div>` : ""}
-              ${aqi !== null ? `
+              ${d.aqi !== null ? `
                 <div class="stat-row">
                   <span class="stat-label">AQI Index</span>
-                  <span class="stat-val" style="color:${aqiInfo.color}">${Math.round(aqi)} / 4</span>
+                  <span class="stat-val" style="color:${d.aqiInfo.color}">${Math.round(d.aqi)} / 4</span>
                 </div>` : ""}
-              ${this._config.show_filter && filterPct !== null ? `
+              ${this._config.show_filter && d.filterPct !== null ? `
                 <div>
                   <div class="stat-row">
-                    <span class="stat-label">${filterLow ? "⚠ Filter Low" : "Filter Life"}</span>
-                    <span class="stat-val" style="color:${filterColor}">${Math.round(filterPct)}%</span>
+                    <span class="stat-label">${d.filterLow ? "⚠ Filter Low" : "Filter Life"}</span>
+                    <span class="stat-val" style="color:${d.filterColor}">${Math.round(d.filterPct)}%</span>
                   </div>
                   <div class="filter-bar">
-                    <div class="filter-fill" style="width:${Math.max(0, Math.min(100, filterPct))}%; background:${filterColor};"></div>
+                    <div class="filter-fill" style="width:${Math.max(0, Math.min(100, d.filterPct))}%; background:${d.filterColor};"></div>
                   </div>
                 </div>` : ""}
             </div>
           </div>` : ""}
 
-        ${!this._config.compact ? `<div class="section-label">Fan Speed</div>` : ""}
-        <div class="segmented">${speedButtons}</div>
-
-        ${opOptions.length > 0 ? `
-          ${!this._config.compact ? `<div class="section-label">Mode</div>` : ""}
-          <div class="segmented">${modeButtons}</div>` : ""}
-
-        ${autoButtons}
-
-        <div class="quick-row">
-          ${e.display ? `
-            <button class="chip-btn green ${displayOn ? "active" : ""}" data-action="display">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z"/></svg>
-              Display
-            </button>` : ""}
-          ${e.childLock ? `
-            <button class="chip-btn ${childLockOn ? "active" : ""}" data-action="lock">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10C4,8.89 4.9,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z"/></svg>
-              Lock
-            </button>` : ""}
-          ${this._config.show_timer && e.timer ? `
-            <button class="chip-btn green ${timerNum > 0 ? "active" : ""}" data-action="timer" title="Click to add +60 min (cycles off after 4h)">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12,20A7,7 0 0,1 5,13A7,7 0 0,1 12,6A7,7 0 0,1 19,13A7,7 0 0,1 12,20M19.03,7.39L20.45,5.97C20,5.46 19.55,5 19.04,4.56L17.62,6C16.07,4.74 14.12,4 12,4A9,9 0 0,0 3,13A9,9 0 0,0 12,22C17,22 21,17.97 21,13C21,10.88 20.26,8.93 19.03,7.39M11,14H13V8H11M15,1H9V3H15V1Z"/></svg>
-              ${escapeHtml(timerLabel)}
-            </button>` : ""}
-        </div>
+        ${this._renderControlsHtml(d, this._config.compact)}
       </div>
     `;
 
-    this._bindEvents(e, { isOn, timerNum });
+    this._bindDeviceEvents({ [d.fanId]: d });
   }
 
-  _bindEvents(e, state) {
-    this.shadowRoot.querySelectorAll("button[data-action]").forEach((btn) => {
+  _renderMulti() {
+    const devices = this._config.entities.map((entry) => {
+      const cfg = typeof entry === "string" ? { entity: entry } : entry;
+      return this._readDevice(cfg.entity, cfg);
+    });
+
+    const valid = devices.filter((d) => !d.missing);
+    const activeCount = valid.filter((d) => d.isOn).length;
+    const pmValues = valid.map((d) => d.pm25).filter((v) => v !== null);
+    const avgPm = pmValues.length ? Math.round(pmValues.reduce((a, b) => a + b, 0) / pmValues.length) : null;
+    const maxPm = pmValues.length ? Math.round(Math.max(...pmValues)) : null;
+    const avgInfo = getAqiInfo(null, avgPm);
+    const maxInfo = getAqiInfo(null, maxPm);
+
+    const rowsHtml = devices.map((d) => {
+      if (d.missing) {
+        return `<div class="device-item"><div class="device-row"><div class="row-info"><div class="row-name">Missing: ${escapeHtml(d.fanId)}</div></div></div></div>`;
+      }
+      const isExpanded = this._expandedEntity === d.fanId;
+      return `
+        <div class="device-item ${isExpanded ? "expanded" : ""}">
+          <div class="device-row" data-toggle-row="${escapeHtml(d.fanId)}">
+            <div class="fan-badge sm ${d.isOn ? "on" : ""} ${d.spinClass}">${FAN_SVG}</div>
+            <div class="row-info">
+              <div class="row-name">${escapeHtml(d.name)}</div>
+              <div class="row-sub">${escapeHtml(d.statusText)}${d.hasError ? " · ⚠ Error" : ""}</div>
+            </div>
+            ${d.pm25 !== null ? `
+              <span class="aqi-pill" style="color:${d.aqiInfo.color}">
+                <span class="aqi-dot" style="background:${d.aqiInfo.color}"></span>
+                ${Math.round(d.pm25)} µg/m³
+              </span>` : `<span></span>`}
+            ${this._config.show_filter && d.filterPct !== null
+              ? `<span class="row-filter" style="color:${d.filterColor}" title="Filter Life">${Math.round(d.filterPct)}%</span>`
+              : `<span></span>`}
+            <span class="row-chev">${CHEVRON_SVG}</span>
+            <button class="power-btn sm ${d.isOn ? "on" : ""}" data-fan="${escapeHtml(d.fanId)}" data-action="power" title="Toggle Power">
+              ${POWER_SVG}
+            </button>
+          </div>
+          ${isExpanded ? `<div class="device-drawer">${this._renderControlsHtml(d, true)}</div>` : ""}
+        </div>
+      `;
+    }).join("");
+
+    this.shadowRoot.innerHTML = `
+      <style>${this._styles()}</style>
+      <div class="card">
+        <div class="overview-top">
+          <div class="title-text">
+            <div class="name">${escapeHtml(this._config.name || "Air Purifiers")}</div>
+            <div class="subtitle">${activeCount} / ${valid.length} active</div>
+          </div>
+          <div class="master-btns">
+            <button class="master-btn" data-master="Auto">All Auto</button>
+            <button class="master-btn" data-master="Sleep">All Sleep</button>
+            <button class="master-btn danger" data-master="Off">All Off</button>
+          </div>
+        </div>
+
+        <div class="summary-strip">
+          <div class="summary-box">
+            <div class="summary-k">Active</div>
+            <div class="summary-v" style="color:var(--lec-accent)">${activeCount} / ${valid.length}</div>
+          </div>
+          <div class="summary-box">
+            <div class="summary-k">Avg PM2.5</div>
+            <div class="summary-v" style="color:${avgInfo.color}">${avgPm !== null ? `${avgPm} µg/m³` : "—"}</div>
+          </div>
+          <div class="summary-box">
+            <div class="summary-k">Worst Room</div>
+            <div class="summary-v" style="color:${maxInfo.color}">${maxPm !== null ? `${maxPm} µg/m³` : "—"}</div>
+          </div>
+        </div>
+
+        <div class="device-list">${rowsHtml}</div>
+      </div>
+    `;
+
+    const deviceMap = Object.fromEntries(valid.map((d) => [d.fanId, d]));
+    this._bindDeviceEvents(deviceMap);
+
+    // Row expand/collapse
+    this.shadowRoot.querySelectorAll("[data-toggle-row]").forEach((row) => {
+      row.addEventListener("click", (ev) => {
+        if (ev.target.closest("button")) return;
+        const fanId = row.dataset.toggleRow;
+        this._expandedEntity = this._expandedEntity === fanId ? null : fanId;
+        this._render();
+      });
+    });
+
+    // Master buttons (All Auto / All Sleep / All Off)
+    this.shadowRoot.querySelectorAll("[data-master]").forEach((btn) => {
       btn.addEventListener("click", () => {
+        const mode = btn.dataset.master;
+        valid.forEach((d) => {
+          if (mode === "Off") {
+            this._callService("fan", "turn_off", { entity_id: d.fanId });
+          } else if (d.e.operatingMode && d.opOptions.includes(mode)) {
+            this._callService("select", "select_option", { entity_id: d.e.operatingMode, option: mode });
+          } else {
+            this._callService("fan", "turn_on", { entity_id: d.fanId });
+          }
+        });
+      });
+    });
+  }
+
+  _bindDeviceEvents(deviceMap) {
+    this.shadowRoot.querySelectorAll("button[data-action]").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const d = deviceMap[btn.dataset.fan];
+        if (!d) return;
         const action = btn.dataset.action;
         if (action === "power") {
-          this._callService("fan", state.isOn ? "turn_off" : "turn_on", { entity_id: e.fan });
+          this._callService("fan", d.isOn ? "turn_off" : "turn_on", { entity_id: d.fanId });
         } else if (action === "speed") {
-          const pct = Number(btn.dataset.pct);
-          this._callService("fan", "set_percentage", { entity_id: e.fan, percentage: pct });
+          this._callService("fan", "set_percentage", { entity_id: d.fanId, percentage: Number(btn.dataset.pct) });
         } else if (action === "mode") {
           const opt = btn.dataset.opt;
-          if (e.operatingMode) {
-            this._callService("select", "select_option", { entity_id: e.operatingMode, option: opt });
+          if (d.e.operatingMode) {
+            this._callService("select", "select_option", { entity_id: d.e.operatingMode, option: opt });
           } else {
-            this._callService("fan", "set_preset_mode", { entity_id: e.fan, preset_mode: opt });
+            this._callService("fan", "set_preset_mode", { entity_id: d.fanId, preset_mode: opt });
           }
-        } else if (action === "automode" && e.autoMode) {
-          this._callService("select", "select_option", { entity_id: e.autoMode, option: btn.dataset.opt });
-        } else if (action === "display" && e.display) {
-          this._callService("switch", "toggle", { entity_id: e.display });
-        } else if (action === "lock" && e.childLock) {
-          this._callService("switch", "toggle", { entity_id: e.childLock });
-        } else if (action === "timer" && e.timer) {
+        } else if (action === "automode" && d.e.autoMode) {
+          this._callService("select", "select_option", { entity_id: d.e.autoMode, option: btn.dataset.opt });
+        } else if (action === "display" && d.e.display) {
+          this._callService("switch", "toggle", { entity_id: d.e.display });
+        } else if (action === "lock" && d.e.childLock) {
+          this._callService("switch", "toggle", { entity_id: d.e.childLock });
+        } else if (action === "timer" && d.e.timer) {
           const steps = [0, 60, 120, 240];
-          const cur = state.timerNum || 0;
+          const cur = d.timerNum || 0;
           const next = steps.find((s) => s > cur) ?? 0;
-          this._callService("number", "set_value", { entity_id: e.timer, value: next });
+          this._callService("number", "set_value", { entity_id: d.e.timer, value: next });
         }
       });
     });
+  }
+
+  _render() {
+    if (!this.shadowRoot) return;
+    if (this._isMulti()) {
+      this._renderMulti();
+    } else if (this._config.entity) {
+      this._renderSingle();
+    }
   }
 }
 
@@ -744,6 +887,10 @@ class LevoitEsphomeCardEditor extends HTMLElement {
     const fans = this._hass
       ? Object.keys(this._hass.states).filter((id) => id.startsWith("fan.")).sort()
       : [];
+    const isMulti = Array.isArray(this._config.entities) && this._config.entities.length > 0;
+    const selectedMulti = isMulti
+      ? this._config.entities.map((e) => (typeof e === "string" ? e : e.entity))
+      : [];
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -752,19 +899,34 @@ class LevoitEsphomeCardEditor extends HTMLElement {
         input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--divider-color, #44475a); background: var(--card-background-color, #282a36); color: var(--primary-text-color, #f8f8f2); font-size: 13px; }
         .row { display: flex; gap: 14px; flex-wrap: wrap; }
         .check { flex-direction: row; align-items: center; gap: 6px; font-weight: 400; }
+        .multi-list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; padding: 8px; border-radius: 8px; border: 1px solid var(--divider-color, #44475a); }
       </style>
       <div class="editor">
         <label>
-          Fan Entity (auto-discovers all Levoit sensors & controls)
-          <select id="entity">
-            ${fans.length
-              ? fans.map((id) => `<option value="${escapeHtml(id)}" ${this._config.entity === id ? "selected" : ""}>${escapeHtml(id)}</option>`).join("")
-              : `<option value="${escapeHtml(this._config.entity || "")}">${escapeHtml(this._config.entity || "fan.levoit_core300s_fan")}</option>`}
+          Layout Mode
+          <select id="mode">
+            <option value="single" ${!isMulti ? "selected" : ""}>Single Purifier (Detail Card)</option>
+            <option value="multi" ${isMulti ? "selected" : ""}>Multiple Purifiers (Whole-Home Overview)</option>
           </select>
         </label>
+        ${!isMulti ? `
+          <label>
+            Fan Entity (auto-discovers all Levoit sensors & controls)
+            <select id="entity">
+              ${fans.length
+                ? fans.map((id) => `<option value="${escapeHtml(id)}" ${this._config.entity === id ? "selected" : ""}>${escapeHtml(id)}</option>`).join("")
+                : `<option value="${escapeHtml(this._config.entity || "")}">${escapeHtml(this._config.entity || "fan.levoit_core300s_fan")}</option>`}
+            </select>
+          </label>` : `
+          <label>
+            Select Purifiers
+            <div class="multi-list">
+              ${fans.map((id) => `<label class="check"><input type="checkbox" data-multi="${escapeHtml(id)}" ${selectedMulti.includes(id) ? "checked" : ""}/> ${escapeHtml(id)}</label>`).join("")}
+            </div>
+          </label>`}
         <label>
-          Custom Name (optional)
-          <input id="name" type="text" placeholder="Auto from entity" value="${escapeHtml(this._config.name || "")}" />
+          Custom Title (optional)
+          <input id="name" type="text" placeholder="${isMulti ? "Air Purifiers" : "Auto from entity"}" value="${escapeHtml(this._config.name || "")}" />
         </label>
         <label>
           Theme
@@ -777,10 +939,29 @@ class LevoitEsphomeCardEditor extends HTMLElement {
           <label class="check"><input id="show_cadr" type="checkbox" ${this._config.show_cadr !== false ? "checked" : ""}/> Show CADR</label>
           <label class="check"><input id="show_filter" type="checkbox" ${this._config.show_filter !== false ? "checked" : ""}/> Show Filter %</label>
           <label class="check"><input id="show_timer" type="checkbox" ${this._config.show_timer !== false ? "checked" : ""}/> Show Timer</label>
-          <label class="check"><input id="compact" type="checkbox" ${this._config.compact ? "checked" : ""}/> Compact</label>
+          ${!isMulti ? `<label class="check"><input id="compact" type="checkbox" ${this._config.compact ? "checked" : ""}/> Compact</label>` : ""}
         </div>
       </div>
     `;
+
+    this.shadowRoot.getElementById("mode")?.addEventListener("change", (ev) => {
+      const next = { ...this._config };
+      if (ev.target.value === "multi") {
+        next.entities = selectedMulti.length ? selectedMulti : (next.entity ? [next.entity] : fans.slice(0, 2));
+        delete next.entity;
+      } else {
+        next.entity = selectedMulti[0] || fans[0] || "fan.levoit_core300s_fan";
+        delete next.entities;
+      }
+      this._emit(next);
+    });
+
+    this.shadowRoot.querySelectorAll("input[data-multi]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const chosen = Array.from(this.shadowRoot.querySelectorAll("input[data-multi]:checked")).map((c) => c.dataset.multi);
+        if (chosen.length) this._emit({ ...this._config, entities: chosen });
+      });
+    });
 
     const bind = (id, prop, isCheck = false) => {
       const el = this.shadowRoot.getElementById(id);
@@ -813,7 +994,7 @@ if (!window.customCards.some((c) => c.type === "levoit-esphome-card")) {
   window.customCards.push({
     type: "levoit-esphome-card",
     name: "Levoit ESPHome Card",
-    description: "Dracula-styled, auto-discovering Lovelace card for tuct/levoit ESPHome air purifiers.",
+    description: "Dracula-styled, auto-discovering Lovelace card for single or multi-room tuct/levoit ESPHome purifiers.",
     preview: true,
   });
 }
