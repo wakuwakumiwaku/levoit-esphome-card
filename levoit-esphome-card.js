@@ -146,6 +146,10 @@ class LevoitEsphomeCard extends HTMLElement {
       return null;
     };
 
+    // Home Assistant exposes ESPHome text sensors as sensor.*; keep text_sensor.* as a fallback.
+    const findTextEntity = (key, pattern, legacyPattern = pattern) =>
+      findEntity(key, "sensor", [pattern]) || findEntity(key, "text_sensor", [legacyPattern]);
+
     return {
       fan: fanId,
       pm25: findEntity("pm25_entity", "sensor", [/pm_?2[_.]?5/i, /aq.*pm/i]),
@@ -158,9 +162,9 @@ class LevoitEsphomeCard extends HTMLElement {
       operatingMode: findEntity("operating_mode_entity", "select", [/fan_operating_mode/i, /operating_mode/i]),
       autoMode: findEntity("auto_mode_entity", "select", [/^auto_mode$/i]),
       timer: findEntity("timer_entity", "number", [/^timer/i]),
-      timerRemaining: findEntity("timer_remaining_entity", "text_sensor", [/timer_remaining/i]),
-      error: findEntity("error_entity", "text_sensor", [/^error$/i]),
-      model: findEntity("model_entity", "text_sensor", [/^model$/i]),
+      timerRemaining: findTextEntity("timer_remaining_entity", /^timer_remaining(?:_|$)/i, /timer_remaining/i),
+      error: findTextEntity("error_entity", /^error$/i),
+      model: findTextEntity("model_entity", /^model$/i),
     };
   }
 
